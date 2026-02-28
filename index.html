@@ -294,13 +294,26 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
         return;
       }
 
+      // Fetch timestamps for all unique block numbers in parallel.
+      const uniqueBlockNums = [...new Set(logs.map(l => l.blockNumber))];
+      const blockTimes = {};
+      await Promise.all(uniqueBlockNums.map(async (hexNum) => {
+        const block = await window.ethereum.request({
+          method: 'eth_getBlockByNumber',
+          params: [hexNum, false],
+        });
+        const ts = parseInt(block.timestamp, 16);
+        // Format as "YYYY-MM-DD HH:MM:SS UTC"
+        blockTimes[hexNum] = new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+      }));
+
       const lines = ['--- ' + logs.length + ' event(s) for channel ' + currentChannelId + ' ---'];
       for (const [i, log] of logs.entries()) {
         const name  = NAMES[log.topics[0]] ?? log.topics[0];
         const block = parseInt(log.blockNumber, 16);
         lines.push('');
         lines.push('[' + (i + 1) + '] ' + name);
-        lines.push('    block:   ' + block);
+        lines.push('    time:    ' + blockTimes[log.blockNumber] + '  (block #' + block + ')');
         lines.push('    tx:      ' + log.transactionHash);
         if (name === 'ChannelOpened') {
           // ChannelOpened has source (topic[2]) and destination (topic[3]) indexed
