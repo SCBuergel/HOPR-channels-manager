@@ -97,8 +97,38 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
 <script>
   // ── Wallet ────────────────────────────────────────────────────────────────
 
-  let walletAddr      = null;
+  let walletAddr       = null;
   let currentChannelId = null;
+
+  const GNOSIS_CHAIN_ID = '0x64'; // 100 decimal
+
+  async function ensureGnosisChain() {
+    const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+    if (chainId === GNOSIS_CHAIN_ID) return;
+
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: GNOSIS_CHAIN_ID }],
+      });
+    } catch (e) {
+      // Error 4902: chain not yet added to the wallet — add it.
+      if (e.code === 4902) {
+        await window.ethereum.request({
+          method: 'wallet_addEthereumChain',
+          params: [{
+            chainId:         GNOSIS_CHAIN_ID,
+            chainName:       'Gnosis Chain',
+            nativeCurrency:  { name: 'xDAI', symbol: 'xDAI', decimals: 18 },
+            rpcUrls:         ['https://rpc.gnosischain.com'],
+            blockExplorerUrls: ['https://gnosisscan.io'],
+          }],
+        });
+      } else {
+        throw e;
+      }
+    }
+  }
 
   async function connectWallet() {
     if (!window.ethereum) {
@@ -108,12 +138,21 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
     try {
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
       walletAddr = accounts[0];
+      await ensureGnosisChain();
       document.getElementById('walletStatus').textContent = 'Connected: ' + walletAddr;
       await refreshBalance();
     } catch (e) {
-      document.getElementById('walletStatus').textContent = 'Connection rejected';
+      document.getElementById('walletStatus').textContent = 'Connection rejected: ' + (e.message ?? e);
     }
   }
+
+  // Warn if the user manually switches away from Gnosis Chain after connecting.
+  window.ethereum?.on('chainChanged', (chainId) => {
+    if (chainId !== GNOSIS_CHAIN_ID) {
+      document.getElementById('walletStatus').textContent =
+        'Wrong network (chain ' + parseInt(chainId, 16) + ') — please switch to Gnosis Chain';
+    }
+  });
 
   async function refreshBalance() {
     if (!walletAddr) { alert('Connect wallet first'); return; }
