@@ -285,35 +285,26 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
 
   // ── Events ────────────────────────────────────────────────────────────────
 
-  // Compute keccak256 of a UTF-8 string using the wallet's web3_sha3 method.
-  // web3_sha3 is a pure local computation in the wallet client; no network call.
-  async function sha3(str) {
-    const hex = '0x' + [...new TextEncoder().encode(str)]
-      .map(b => b.toString(16).padStart(2, '0')).join('');
-    return window.ethereum.request({ method: 'web3_sha3', params: [hex] });
-  }
-
   async function loadEvents() {
-    if (!window.ethereum)    { alert('Connect wallet first');                       return; }
-    if (!currentChannelId)   { alert('Query a channel first to get its ID');        return; }
+    if (!window.ethereum)    { alert('Connect wallet first');                return; }
+    if (!currentChannelId)   { alert('Query a channel first to get its ID'); return; }
 
     const channelsAddr = document.getElementById('channelsAddr').value.trim();
     const out = document.getElementById('eventsOutput');
     out.textContent = 'Loading…';
 
     try {
-      // Canonical event signatures (no spaces, no "indexed" keyword).
-      // Compute topic0 for each via keccak256 so we don't hardcode hashes.
-      const EVENT_SIGS = [
-        'ChannelOpened(bytes32,address,address,bytes32)',
-        'ChannelBalanceIncreased(bytes32,bytes32)',
-        'ChannelBalanceDecreased(bytes32,bytes32)',
-        'OutgoingChannelClosureInitiated(bytes32,bytes32)',
-        'ChannelClosed(bytes32,bytes32)',
-        'TicketRedeemed(bytes32,bytes32)',
-      ];
-      const topics0 = await Promise.all(EVENT_SIGS.map(sha3));
-      const NAMES   = Object.fromEntries(topics0.map((t, i) => [t, EVENT_SIGS[i].split('(')[0]]));
+      // topic0 hashes verified with: cast keccak '<signature>'
+      const TOPICS = {
+        '0x004c0177ad15bb302b4419e9ac96065d6f436e0f61972f97bbe272834c40f934': 'ChannelOpened',
+        '0xec21547ca1e22edc3f9b4f4e0da94638b5b94dcb18d52dcc072abe5801a8013c': 'ChannelBalanceIncreased',
+        '0x0c4672f14b63bb6354fac475ee498055a2784455673af224717b9770fd68d8d1': 'ChannelBalanceDecreased',
+        '0x0061e8037197b4d91cf8add2a0736613459081f236d1c8ab58549ebbc330b4e3': 'OutgoingChannelClosureInitiated',
+        '0x197bba684a6afb7ba24f1d265605414b1d0051a6e295d6ff7b6e78e870d7a7f0': 'ChannelClosed',
+        '0xed22f34d154d253a7f6fd477439be59080a1554aa0d0642686d64223ab544c8a': 'TicketRedeemed',
+      };
+      const topics0 = Object.keys(TOPICS);
+      const NAMES   = TOPICS;
 
       // Single eth_getLogs call:
       //   topics[0]  OR of all 6 event signatures
