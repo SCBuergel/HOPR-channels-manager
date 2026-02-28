@@ -76,6 +76,13 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
 
 <hr>
 
+<h2>Events</h2>
+<p>Fetches all channel events from block 0 to latest, filtered by the current channel ID.</p>
+<button onclick="loadEvents()">Load Events</button>
+<pre id="eventsOutput">--</pre>
+
+<hr>
+
 <h2>Top Up Channel</h2>
 <p>
   Calls <code>wxHOPR.send(channelsContract, amount, userData)</code> where<br>
@@ -90,7 +97,8 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
 <script>
   // ── Wallet ────────────────────────────────────────────────────────────────
 
-  let walletAddr = null;
+  let walletAddr      = null;
+  let currentChannelId = null;
 
   async function connectWallet() {
     if (!window.ethereum) {
@@ -211,6 +219,7 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
       // Step 1: _getChannelId(address from, address to)  →  bytes32
       const getIdCalldata = '0xbe9babdc' + abiAddress(from) + abiAddress(to);
       const channelIdRaw  = await ethCall(channelsAddr, getIdCalldata);
+      currentChannelId = channelIdRaw;
 
       // Step 2: channels(bytes32 channelId)  →  Channel struct
       const channelsCalldata = '0x7a7ebd7b' + abiBytes32(channelIdRaw);
@@ -229,6 +238,81 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
         'epoch:         ' + ch.epoch,
         'status:        ' + ch.statusName + '  (' + ch.status + ')',
       ].join('\n');
+
+    } catch (e) {
+      out.textContent = 'Error: ' + (e.message || JSON.stringify(e));
+    }
+  }
+
+  // ── Events ────────────────────────────────────────────────────────────────
+
+  // Compute keccak256 of a UTF-8 string using the wallet's web3_sha3 method.
+  // web3_sha3 is a pure local computation in the wallet client; no network call.
+  async function sha3(str) {
+    const hex = '0x' + [...new TextEncoder().encode(str)]
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    return window.ethereum.request({ method: 'web3_sha3', params: [hex] });
+  }
+
+  async function loadEvents() {
+    if (!window.ethereum)    { alert('Connect wallet first');                       return; }
+    if (!currentChannelId)   { alert('Query a channel first to get its ID');        return; }
+
+    const channelsAddr = document.getElementById('channelsAddr').value.trim();
+    const out = document.getElementById('eventsOutput');
+    out.textContent = 'Loading…';
+
+    try {
+      // Canonical event signatures (no spaces, no "indexed" keyword).
+      // Compute topic0 for each via keccak256 so we don't hardcode hashes.
+      const EVENT_SIGS = [
+        'ChannelOpened(bytes32,address,address,bytes32)',
+        'ChannelBalanceIncreased(bytes32,bytes32)',
+        'ChannelBalanceDecreased(bytes32,bytes32)',
+        'OutgoingChannelClosureInitiated(bytes32,bytes32)',
+        'ChannelClosed(bytes32,bytes32)',
+        'TicketRedeemed(bytes32,bytes32)',
+      ];
+      const topics0 = await Promise.all(EVENT_SIGS.map(sha3));
+      const NAMES   = Object.fromEntries(topics0.map((t, i) => [t, EVENT_SIGS[i].split('(')[0]]));
+
+      // Single eth_getLogs call:
+      //   topics[0]  OR of all 6 event signatures
+      //   topics[1]  channelId (first indexed param in every one of these events)
+      const logs = await window.ethereum.request({
+        method: 'eth_getLogs',
+        params: [{
+          address:   channelsAddr,
+          topics:    [topics0, currentChannelId],
+          fromBlock: '0x0',
+          toBlock:   'latest',
+        }],
+      });
+
+      if (logs.length === 0) {
+        out.textContent = 'No events found for channel ' + currentChannelId;
+        return;
+      }
+
+      const lines = ['--- ' + logs.length + ' event(s) for channel ' + currentChannelId + ' ---'];
+      for (const [i, log] of logs.entries()) {
+        const name  = NAMES[log.topics[0]] ?? log.topics[0];
+        const block = parseInt(log.blockNumber, 16);
+        lines.push('');
+        lines.push('[' + (i + 1) + '] ' + name);
+        lines.push('    block:   ' + block);
+        lines.push('    tx:      ' + log.transactionHash);
+        if (name === 'ChannelOpened') {
+          // ChannelOpened has source (topic[2]) and destination (topic[3]) indexed
+          lines.push('    source:  0x' + log.topics[2].slice(-40));
+          lines.push('    dest:    0x' + log.topics[3].slice(-40));
+        }
+        // The non-indexed `bytes32 channel` field is always in log.data
+        if (log.data && log.data !== '0x') {
+          lines.push('    channel: ' + log.data);
+        }
+      }
+      out.textContent = lines.join('\n');
 
     } catch (e) {
       out.textContent = 'Error: ' + (e.message || JSON.stringify(e));
