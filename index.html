@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>HOPR Channels Manager</title>
+</head>
+<body>
+
+<h1>HOPR Channels Manager</h1>
+<p>All contracts on <strong>Gnosis Chain</strong>. Calls go through your connected wallet's RPC.</p>
+
+<hr>
+
+<h2>Wallet</h2>
+<button onclick="connectWallet()">Connect Wallet</button>
+<span id="walletStatus">Not connected</span>
+&nbsp;&nbsp;|&nbsp;&nbsp;
+wxHOPR balance: <strong id="tokenBalance">--</strong>
+<button onclick="refreshBalance()" title="Refresh balance">&#8635;</button>
+
+<hr>
+
+<h2>Contracts</h2>
+<table>
+  <tr>
+    <td><label for="tokenAddr">wxHOPR Token:</label></td>
+    <td><input id="tokenAddr" size="46" value="0xD4fdec44DB9D44B8f2b6d529620f9C0C7066A2c1"></td>
+  </tr>
+  <tr>
+    <td><label for="channelsAddr">HoprChannels:</label></td>
+    <td><input id="channelsAddr" size="46" value="0x69E63A01a2209F733C83ECa619ddDa2BEA4d5Cdf"></td>
+  </tr>
+</table>
+
+<hr>
+
+<h2>Channel</h2>
+
+<fieldset>
+  <legend>From</legend>
+  <select id="fromSelect" onchange="onSelectChange('from')">
+    <option value="">-- select relay --</option>
+    <option value="0xc00b7d90463394ec29a080393ff09a2ed82a0f86">relay to UK      (0xc00b...0f86)</option>
+    <option value="0x6250eb481b40f4609d32de35bd9b827212713f35">relay to Brazil  (0x6250...3f35)</option>
+    <option value="0xfe3af421afb84eed445c2b8f1892e3984d3e41ea">relay to USA     (0xfe3a...41ea)</option>
+    <option value="0xee7c14d7081cdeed6503478db0bfc26e4353feef">relay to Australia (0xee7c...feef)</option>
+    <option value="0x8f40df42bba9fa560bdf0b66a0d964a9a1ee85c3">relay to India   (0x8f40...85c3)</option>
+    <option value="0x16a8c54a8ac982d167adae90781e0f822ed1db2d">relay to S.Korea (0x16a8...db2d)</option>
+  </select>
+  &nbsp;or custom:&nbsp;
+  <input id="fromCustom" size="44" placeholder="0x..." oninput="onCustomInput('from')">
+</fieldset>
+
+<fieldset>
+  <legend>To</legend>
+  <select id="toSelect" onchange="onSelectChange('to')">
+    <option value="">-- select relay --</option>
+    <option value="0xc00b7d90463394ec29a080393ff09a2ed82a0f86">relay to UK      (0xc00b...0f86)</option>
+    <option value="0x6250eb481b40f4609d32de35bd9b827212713f35">relay to Brazil  (0x6250...3f35)</option>
+    <option value="0xfe3af421afb84eed445c2b8f1892e3984d3e41ea">relay to USA     (0xfe3a...41ea)</option>
+    <option value="0xee7c14d7081cdeed6503478db0bfc26e4353feef">relay to Australia (0xee7c...feef)</option>
+    <option value="0x8f40df42bba9fa560bdf0b66a0d964a9a1ee85c3">relay to India   (0x8f40...85c3)</option>
+    <option value="0x16a8c54a8ac982d167adae90781e0f822ed1db2d">relay to S.Korea (0x16a8...db2d)</option>
+  </select>
+  &nbsp;or custom:&nbsp;
+  <input id="toCustom" size="44" placeholder="0x..." oninput="onCustomInput('to')">
+</fieldset>
+
+<br>
+<button onclick="queryChannel()">Query Channel</button>
+
+<hr>
+
+<h2>Result</h2>
+<pre id="output">--</pre>
+
+<hr>
+
+<h2>Top Up Channel</h2>
+<p>
+  Calls <code>wxHOPR.send(channelsContract, amount, userData)</code> where<br>
+  <code>userData = abi.encodePacked(from, amount_uint96, to, uint96(0))</code>.<br>
+  Uses the From / To addresses selected above. Your wallet must hold wxHOPR.
+</p>
+<label>Amount (HOPR):&nbsp;<input id="topUpAmount" type="number" min="0" step="any" placeholder="e.g. 10"></label>
+&nbsp;<button onclick="topUpChannel()">Top Up Channel</button>
+<br><br>
+<span id="topUpStatus"></span>
+
+<script>
+  // ── Wallet ────────────────────────────────────────────────────────────────
+
+  let walletAddr = null;
+
+  async function connectWallet() {
+    if (!window.ethereum) {
+      alert('No EIP-1193 wallet found. Install MetaMask or similar.');
+      return;
+    }
+    try {
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      walletAddr = accounts[0];
+      document.getElementById('walletStatus').textContent = 'Connected: ' + walletAddr;
+      await refreshBalance();
+    } catch (e) {
+      document.getElementById('walletStatus').textContent = 'Connection rejected';
+    }
+  }
+
+  async function refreshBalance() {
+    if (!walletAddr) { alert('Connect wallet first'); return; }
+    const tokenAddr = document.getElementById('tokenAddr').value.trim();
+    try {
+      // balanceOf(address)  →  uint256
+      const data   = '0x70a08231' + abiAddress(walletAddr);
+      const result = await ethCall(tokenAddr, data);
+      const bal    = BigInt(result);
+      document.getElementById('tokenBalance').textContent = formatHOPR(bal);
+    } catch (e) {
+      document.getElementById('tokenBalance').textContent = 'error';
+    }
+  }
+
+  // ── Address helpers ────────────────────────────────────────────────────────
+
+  function onSelectChange(side) {
+    const val = document.getElementById(side + 'Select').value;
+    if (val) document.getElementById(side + 'Custom').value = val;
+  }
+
+  function onCustomInput(side) {
+    document.getElementById(side + 'Select').value = '';
+  }
+
+  function getAddress(side) {
+    const custom = document.getElementById(side + 'Custom').value.trim();
+    const sel    = document.getElementById(side + 'Select').value;
+    return custom || sel;
+  }
+
+  // ── ABI encoding (manual, no deps) ────────────────────────────────────────
+
+  // Pad a hex address (with or without 0x) to a 32-byte ABI word
+  function abiAddress(addr) {
+    return addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+  }
+
+  // Pass a raw 32-byte hex value (with or without 0x) as a bytes32 ABI word
+  function abiBytes32(hex) {
+    return hex.replace(/^0x/, '').padStart(64, '0');
+  }
+
+  // ── eth_call via wallet provider ──────────────────────────────────────────
+
+  async function ethCall(to, data) {
+    return window.ethereum.request({
+      method: 'eth_call',
+      params: [{ to, data }, 'latest'],
+    });
+  }
+
+  // ── Channel struct decoding ────────────────────────────────────────────────
+
+  // channels() returns: balance uint96, ticketIndex uint48, closureTime uint32,
+  //                     epoch uint24, status uint8
+  // ABI-encoded: each field padded to 32 bytes (right-aligned / big-endian).
+  function decodeChannelStruct(hex) {
+    const h = hex.replace(/^0x/, '');
+    const word = (n) => BigInt('0x' + (h.slice(n * 64, n * 64 + 64) || '0'));
+
+    const STATUS_NAMES = ['CLOSED', 'WAITING_FOR_COMMITMENT', 'OPEN', 'PENDING_TO_CLOSE'];
+    const status = word(4);
+
+    return {
+      balance:      word(0),
+      ticketIndex:  word(1),
+      closureTime:  word(2),
+      epoch:        word(3),
+      status,
+      statusName:   STATUS_NAMES[Number(status)] ?? 'UNKNOWN(' + status + ')',
+    };
+  }
+
+  // Format a raw uint256 wei value as a decimal token amount with 18 decimals.
+  // Uses BigInt throughout to avoid floating-point precision loss.
+  function formatHOPR(wei) {
+    const UNIT = 10n ** 18n;
+    const whole = wei / UNIT;
+    const frac  = wei % UNIT;
+    if (frac === 0n) return whole.toString() + ' HOPR';
+    const fracStr = frac.toString().padStart(18, '0').replace(/0+$/, '');
+    return whole.toString() + '.' + fracStr + ' HOPR';
+  }
+
+  // ── Main query ────────────────────────────────────────────────────────────
+
+  async function queryChannel() {
+    if (!window.ethereum) { alert('Connect wallet first'); return; }
+
+    const from         = getAddress('from');
+    const to           = getAddress('to');
+    const channelsAddr = document.getElementById('channelsAddr').value.trim();
+
+    if (!from) { alert('Provide a "From" address'); return; }
+    if (!to)   { alert('Provide a "To" address');   return; }
+
+    const out = document.getElementById('output');
+    out.textContent = 'Querying…';
+
+    try {
+      // Step 1: _getChannelId(address from, address to)  →  bytes32
+      const getIdCalldata = '0xbe9babdc' + abiAddress(from) + abiAddress(to);
+      const channelIdRaw  = await ethCall(channelsAddr, getIdCalldata);
+
+      // Step 2: channels(bytes32 channelId)  →  Channel struct
+      const channelsCalldata = '0x7a7ebd7b' + abiBytes32(channelIdRaw);
+      const channelInfoRaw   = await ethCall(channelsAddr, channelsCalldata);
+
+      const ch = decodeChannelStruct(channelInfoRaw);
+
+      out.textContent = [
+        'From:          ' + from,
+        'To:            ' + to,
+        'Channel ID:    ' + channelIdRaw,
+        '',
+        'balance:       ' + formatHOPR(ch.balance) + '  (raw: ' + ch.balance + ')',
+        'ticketIndex:   ' + ch.ticketIndex,
+        'closureTime:   ' + ch.closureTime,
+        'epoch:         ' + ch.epoch,
+        'status:        ' + ch.statusName + '  (' + ch.status + ')',
+      ].join('\n');
+
+    } catch (e) {
+      out.textContent = 'Error: ' + (e.message || JSON.stringify(e));
+    }
+  }
+
+  // ── Top Up Channel ────────────────────────────────────────────────────────
+
+  // Parse a human-readable HOPR amount string (e.g. "17.5") into wei as BigInt.
+  // Handles up to 18 decimal places; truncates any excess.
+  function parseHOPR(str) {
+    const [whole = '0', frac = ''] = str.trim().split('.');
+    const fracNorm = frac.padEnd(18, '0').slice(0, 18);
+    return BigInt(whole || '0') * 10n ** 18n + BigInt(fracNorm);
+  }
+
+  // Encode the ERC777 send() calldata.
+  //
+  // Solidity equivalent:
+  //   bytes memory userData = abi.encodePacked(from, uint96(amount), to, uint96(0));
+  //   token.send(channelsAddr, amount, userData);
+  //
+  // ABI layout of send(address recipient, uint256 amount, bytes data):
+  //   [4]  selector  9bd9bbc6
+  //   [32] recipient (channelsAddr, left-padded)
+  //   [32] amount    (uint256, left-padded)
+  //   [32] offset    = 96  (bytes param head; points past the three fixed slots)
+  //   [32] length    = 64  (userData is 64 bytes)
+  //   [64] userData  = from(20) | amount_uint96(12) | to(20) | zero_uint96(12)
+  //
+  function encodeERC777Send(channelsAddr, fromAddr, toAddr, amountWei) {
+    const userData =
+      fromAddr.toLowerCase().replace(/^0x/, '')  +  // address: 20 bytes = 40 hex
+      amountWei.toString(16).padStart(24, '0')   +  // uint96:  12 bytes = 24 hex
+      toAddr.toLowerCase().replace(/^0x/, '')    +  // address: 20 bytes = 40 hex
+      '000000000000000000000000';                    // uint96(0): 12 bytes = 24 hex
+    // userData = 128 hex chars = 64 bytes, already a multiple of 32 → no tail padding
+
+    return '0x'
+      + '9bd9bbc6'                                                      // selector
+      + channelsAddr.toLowerCase().replace(/^0x/, '').padStart(64, '0') // recipient
+      + amountWei.toString(16).padStart(64, '0')                        // amount uint256
+      + (96).toString(16).padStart(64, '0')                             // bytes offset
+      + (64).toString(16).padStart(64, '0')                             // bytes length
+      + userData;
+  }
+
+  async function topUpChannel() {
+    if (!walletAddr) { alert('Connect wallet first'); return; }
+
+    const from         = getAddress('from');
+    const to           = getAddress('to');
+    const tokenAddr    = document.getElementById('tokenAddr').value.trim();
+    const channelsAddr = document.getElementById('channelsAddr').value.trim();
+    const amountStr    = document.getElementById('topUpAmount').value.trim();
+
+    if (!from)      { alert('Provide a "From" address'); return; }
+    if (!to)        { alert('Provide a "To" address');   return; }
+    if (!amountStr) { alert('Enter an amount');          return; }
+
+    let amountWei;
+    try {
+      amountWei = parseHOPR(amountStr);
+      if (amountWei === 0n) { alert('Amount must be greater than 0'); return; }
+      // uint96 max = 2^96 - 1
+      if (amountWei > 2n ** 96n - 1n) { alert('Amount exceeds uint96 max'); return; }
+    } catch {
+      alert('Invalid amount');
+      return;
+    }
+
+    const statusEl = document.getElementById('topUpStatus');
+    statusEl.textContent = 'Sending transaction…';
+
+    try {
+      const calldata = encodeERC777Send(channelsAddr, from, to, amountWei);
+      const txHash = await window.ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{ from: walletAddr, to: tokenAddr, data: calldata }],
+      });
+      statusEl.textContent = 'Transaction sent: ' + txHash;
+      // Refresh balance after send
+      await refreshBalance();
+    } catch (e) {
+      statusEl.textContent = 'Error: ' + (e.message || JSON.stringify(e));
+    }
+  }
+</script>
+
+</body>
+</html>
