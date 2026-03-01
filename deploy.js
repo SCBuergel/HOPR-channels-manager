@@ -12,16 +12,13 @@ const RPC_URL = process.env.RPC_URL;
 // ── 1. Upload to Pinata ──────────────────────────────────────────────────────
 
 async function uploadToPinata() {
-  const filePath = path.resolve("index.html"); // change to your file/folder
+  const filePath = path.resolve("index.html");
   const form = new FormData();
   form.append("file", fs.createReadStream(filePath));
-  form.append(
-    "pinataMetadata",
-    JSON.stringify({ name: ENS_NAME + " – " + new Date().toISOString() })
-  );
+  form.append("name", ENS_NAME + " – " + new Date().toISOString());
 
   const res = await axios.post(
-    "https://api.pinata.cloud/pinning/pinFileToIPFS",
+    "https://uploads.pinata.cloud/v3/files",
     form,
     {
       headers: {
@@ -31,7 +28,7 @@ async function uploadToPinata() {
     }
   );
 
-  const cid = res.data.IpfsHash;
+  const cid = res.data.data.cid;
   console.log("Pinned CID:", cid);
   return cid;
 }
