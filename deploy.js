@@ -4,7 +4,7 @@ const { ethers } = require("ethers");
 
 const PINATA_JWT = process.env.PINATA_JWT;
 const ENS_PRIVATE_KEY = process.env.ENS_PRIVATE_KEY;
-const ENS_NAME = process.env.ENS_NAME;
+const ENS_NAME = "hopr-channels-manager.tools.scbuergel.eth";
 const RPC_URL = process.env.RPC_URL;
 
 // ── 1. Upload to Pinata ──────────────────────────────────────────────────────
@@ -109,7 +109,10 @@ async function updateENS(cid) {
   const contentHash = encodeContentHash(cid);
   console.log("Encoded content hash:", contentHash);
 
-  const tx = await resolver.setContenthash(node, contentHash);
+  const tx = await resolver.setContenthash(node, contentHash, {
+    maxFeePerGas: ethers.parseUnits("10", "gwei"),
+    maxPriorityFeePerGas: ethers.parseUnits("0.001", "gwei"),
+  });
   console.log("Tx sent:", tx.hash);
   await tx.wait();
   console.log("✅ ENS content record updated!");

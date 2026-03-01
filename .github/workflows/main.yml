@@ -25,6 +25,5 @@ jobs:
         env:
           PINATA_JWT: ${{ secrets.PINATA_JWT }}
           ENS_PRIVATE_KEY: ${{ secrets.ENS_PRIVATE_KEY }}
-          ENS_NAME: yourname.eth          # ← change this
-          RPC_URL: https://ethereum.publicnode.com  # or use Alchemy/Infura
+          RPC_URL: https://ethereum.publicnode.com
         run: node deploy.js
