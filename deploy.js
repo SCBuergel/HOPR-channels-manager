@@ -16,6 +16,7 @@ async function uploadToPinata() {
   const form = new FormData();
   form.append("file", fs.createReadStream(filePath));
   form.append("name", ENS_NAME + " – " + new Date().toISOString());
+  form.append("network", "public");
 
   const res = await axios.post(
     "https://uploads.pinata.cloud/v3/files",
