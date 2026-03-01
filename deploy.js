@@ -1,5 +1,3 @@
-const axios = require("axios");
-const FormData = require("form-data");
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
@@ -12,24 +10,19 @@ const RPC_URL = process.env.RPC_URL;
 // ── 1. Upload to Pinata ──────────────────────────────────────────────────────
 
 async function uploadToPinata() {
-  const filePath = path.resolve("index.html");
-  const form = new FormData();
-  form.append("file", fs.createReadStream(filePath));
-  form.append("name", ENS_NAME + " – " + new Date().toISOString());
-  form.append("network", "public");
+  const fileBuffer = fs.readFileSync(path.resolve("index.html"));
+  const formData = new FormData();
+  formData.append("file", new File([fileBuffer], "index.html", { type: "text/html" }));
+  formData.append("name", ENS_NAME + " – " + new Date().toISOString());
+  formData.append("network", "public");
 
-  const res = await axios.post(
-    "https://uploads.pinata.cloud/v3/files",
-    form,
-    {
-      headers: {
-        Authorization: `Bearer ${PINATA_JWT}`,
-        ...form.getHeaders(),
-      },
-    }
-  );
-
-  const cid = res.data.data.cid;
+  const res = await fetch("https://uploads.pinata.cloud/v3/files", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${PINATA_JWT}` },
+    body: formData,
+  });
+  const data = await res.json();
+  const cid = data.data.cid;
   console.log("Pinned CID:", cid);
   return cid;
 }
