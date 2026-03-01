@@ -39,28 +39,8 @@ async function uploadToPinata() {
 // The simplest approach: use the raw hex encoding that ENS expects.
 
 function encodeContentHash(cid) {
-  // ipfs://CID → ENS content hash hex
-  // We encode as: codec(ipfs=0xe3) + cid-version + multicodec + multihash
-  // Easiest: use the content-hash library encoding manually for CIDv0
-  // For a CIDv0 (starts with Qm), ENS uses: 0xe3010170 + sha2-256 multihash
-  // For simplicity we'll use the `content-hash` npm package approach inline.
-
-  const bs58 = require("bs58"); // available via ethers deps
-
-  if (cid.startsWith("Qm")) {
-    // CIDv0 → decode base58 → get the multihash bytes
-    const decoded = bs58.decode(cid); // 34 bytes: [0x12, 0x20, ...32 bytes hash]
-    // ENS content hash prefix for ipfs: 0xe3010170
-    const prefix = Buffer.from([0xe3, 0x01, 0x01, 0x70]);
-    const full = Buffer.concat([prefix, decoded]);
-    return "0x" + full.toString("hex");
-  } else {
-    // CIDv1 — use content-hash package (install separately) or convert via API
-    // For now, throw and let the user handle v1 with the content-hash package
-    throw new Error(
-      "CIDv1 detected. Add `content-hash` package and use contentHash.fromIpfs(cid)."
-    );
-  }
+  const contentHash = require("content-hash");
+  return "0x" + contentHash.fromIpfs(cid);
 }
 
 // ── 3. Update ENS content record ────────────────────────────────────────────
