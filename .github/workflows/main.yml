@@ -19,7 +19,7 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
-        run: npm install axios form-data ethers@6 content-hash
+        run: npm install axios form-data ethers@6
 
       - name: Upload to Pinata and update ENS
         env:
