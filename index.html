@@ -34,6 +34,34 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
 
 <hr>
 
+<h2>TicketRedeemed Activity</h2>
+<table>
+  <tr>
+    <td><label for="hmFromBlock">From block:</label></td>
+    <td><input id="hmFromBlock" value="44027565" size="12"></td>
+    <td>&nbsp;&nbsp;<label for="hmToBlock">To block:</label></td>
+    <td><input id="hmToBlock" placeholder="latest" size="12"></td>
+    <td>&nbsp;<button id="hmFetchLatestBtn" onclick="fetchLatestBlock()">Fetch latest</button></td>
+  </tr>
+  <tr>
+    <td><label for="hmLogRange">Block range per log query:</label></td>
+    <td><input id="hmLogRange" type="number" value="10000" min="1" size="10"></td>
+    <td>&nbsp;&nbsp;<label for="hmBatchSize">Blocks per timestamp batch:</label></td>
+    <td><input id="hmBatchSize" type="number" value="100" min="1" size="6"></td>
+  </tr>
+</table>
+<button id="hmLoadBtn" onclick="loadHeatmap()">Load</button>
+<button id="hmPauseBtn" onclick="pauseResumeHeatmap()" disabled>Pause</button>
+<button id="hmAbortBtn" onclick="abortHeatmap()" disabled>Abort</button>
+<br><br>
+<div id="hmProgress" style="display:none">
+  <progress id="hmBar" value="0" max="100" style="width:300px"></progress>
+  <span id="hmBarText"></span>
+</div>
+<div id="hmOutput"></div>
+
+<hr>
+
 <h2>Channel</h2>
 
 <fieldset>
@@ -94,6 +122,8 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
 <br><br>
 <span id="topUpStatus"></span>
 
+<div id="hm-tooltip" style="position:fixed;display:none;pointer-events:none;background:#222;color:#eee;padding:3px 8px;font-family:monospace;font-size:12px;white-space:nowrap"></div>
+
 <script>
   // ── Wallet ────────────────────────────────────────────────────────────────
 
@@ -141,6 +171,7 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
       await ensureGnosisChain();
       document.getElementById('walletStatus').textContent = 'Connected: ' + walletAddr;
       await refreshBalance();
+      loadHeatmap();
     } catch (e) {
       document.getElementById('walletStatus').textContent = 'Connection rejected: ' + (e.message ?? e);
     }
@@ -443,7 +474,382 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
       statusEl.textContent = 'Error: ' + (e.message || JSON.stringify(e));
     }
   }
+
+  // ── TicketRedeemed heatmap ────────────────────────────────────────────────
+
+  let hmAborted = false;
+  let hmPaused  = false;
+  let hmRunning = false;
+  let hmState   = null;  // saved state when paused; null = idle
+
+  function updateHmButtons() {
+    const loadBtn  = document.getElementById('hmLoadBtn');
+    const pauseBtn = document.getElementById('hmPauseBtn');
+    const abortBtn = document.getElementById('hmAbortBtn');
+    loadBtn.disabled  = hmRunning;
+    abortBtn.disabled = !hmRunning && !hmState;
+    if (hmRunning) {
+      pauseBtn.disabled    = false;
+      pauseBtn.textContent = 'Pause';
+    } else if (hmState) {
+      pauseBtn.disabled    = false;
+      pauseBtn.textContent = 'Resume';
+    } else {
+      pauseBtn.disabled    = true;
+      pauseBtn.textContent = 'Pause';
+    }
+  }
+
+  // Send a JSON-RPC batch (array of request objects) as a single network call.
+  // Uses the wallet's legacy sendAsync API which both MetaMask and Rabby support.
+  // Falls back to individual EIP-1193 window.ethereum.request calls if unavailable.
+  function rpcBatch(requests) {
+    return new Promise((resolve, reject) => {
+      if (typeof window.ethereum.sendAsync === 'function') {
+        window.ethereum.sendAsync(requests, (err, results) => {
+          if (err) reject(new Error(err.message || JSON.stringify(err)));
+          else     resolve(results);
+        });
+      } else {
+        // Fallback: fire all requests in parallel via EIP-1193
+        Promise.all(requests.map(r =>
+          window.ethereum.request({ method: r.method, params: r.params })
+            .then(result => ({ id: r.id, result }))
+        )).then(resolve).catch(reject);
+      }
+    });
+  }
+
+  async function fetchLatestBlock() {
+    if (!window.ethereum) { alert('Connect wallet first'); return; }
+    const btn = document.getElementById('hmFetchLatestBtn');
+    btn.disabled = true;
+    btn.textContent = 'Fetching…';
+    try {
+      const hex = await window.ethereum.request({ method: 'eth_blockNumber' });
+      document.getElementById('hmToBlock').value = parseInt(hex, 16);
+    } catch (e) {
+      alert('Failed to fetch latest block: ' + (e.message || JSON.stringify(e)));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Fetch latest';
+    }
+  }
+
+  function abortHeatmap() {
+    hmAborted = true;
+    hmState   = null;
+    // UI resets when the running loop detects hmAborted and calls done()
+  }
+
+  function pauseResumeHeatmap() {
+    if (hmRunning) {
+      hmPaused = true;            // loop detects this and calls pause()
+    } else if (hmState) {
+      startHeatmapLoad();         // resume from saved state
+    }
+  }
+
+  function loadHeatmap() {
+    hmState = null;               // discard any saved state — fresh start
+    startHeatmapLoad(true);       // auto-pause after first chunk with events
+  }
+
+  async function startHeatmapLoad(autoStopAfterFirst = false) {
+    if (hmRunning) return;
+    if (!window.ethereum) { alert('Connect wallet first'); return; }
+
+    const channelsAddr = document.getElementById('channelsAddr').value.trim();
+    const batchSize    = Math.max(1, parseInt(document.getElementById('hmBatchSize').value) || 100);
+    const out     = document.getElementById('hmOutput');
+    const bar     = document.getElementById('hmBar');
+    const barText = document.getElementById('hmBarText');
+    const prog    = document.getElementById('hmProgress');
+
+    hmAborted = false;
+    hmPaused  = false;
+    hmRunning = true;
+    prog.style.display = '';
+    updateHmButtons();
+
+    const TICKET_TOPIC = '0xed22f34d154d253a7f6fd477439be59080a1554aa0d0642686d64223ab544c8a';
+    let chunks, ci, logs, blockTimes, pendingBlocks, pendingBatchI;
+
+    if (hmState) {
+      // Resume: restore saved state
+      ({ chunks, ci, logs, blockTimes, pendingBlocks, pendingBatchI } = hmState);
+      hmState = null;
+    } else {
+      // Fresh start: read config from UI and build chunk list
+      const fromBlockDec = parseInt(document.getElementById('hmFromBlock').value) || 0;
+      const toBlockRaw   = document.getElementById('hmToBlock').value.trim();
+      const toBlock      = toBlockRaw ? '0x' + parseInt(toBlockRaw).toString(16) : 'latest';
+      const logRange     = Math.max(1, parseInt(document.getElementById('hmLogRange').value) || 10000);
+
+      bar.value = 0;
+      barText.textContent = 'Resolving block range…';
+
+      let toBlockNum;
+      try {
+        toBlockNum = toBlock === 'latest'
+          ? parseInt(await window.ethereum.request({ method: 'eth_blockNumber' }), 16)
+          : parseInt(toBlock, 16);
+      } catch (e) {
+        barText.textContent = 'Failed to resolve latest block: ' + (e.message || JSON.stringify(e));
+        hmRunning = false;
+        prog.style.display = 'none';
+        updateHmButtons();
+        return;
+      }
+
+      chunks = [];
+      for (let b = toBlockNum; b >= fromBlockDec; b -= logRange)
+        chunks.push([Math.max(b - logRange + 1, fromBlockDec), b]);
+
+      ci            = 0;
+      logs          = [];
+      blockTimes    = {};
+      pendingBlocks = null;
+      pendingBatchI = 0;
+    }
+
+    // Called when fully done (all chunks processed or aborted).
+    const done = () => {
+      hmRunning = false;
+      hmState   = null;
+      prog.style.display = 'none';
+      barText.textContent = '';
+      updateHmButtons();
+      renderHeatmap(logs, blockTimes);
+    };
+
+    // Called when the user pauses: serialise current position into hmState.
+    const pause = () => {
+      hmState = { chunks, ci, logs, blockTimes, pendingBlocks, pendingBatchI };
+      hmRunning = false;
+      bar.value = 0;
+      barText.textContent = 'Paused — click Resume to continue';
+      updateHmButtons();
+      renderHeatmap(logs, blockTimes);
+    };
+
+    for (; ci < chunks.length; ci++) {
+      if (hmAborted) { done(); return; }
+      if (hmPaused)  { pause(); return; }   // pendingBlocks is null at this point
+
+      const [chunkFrom, chunkTo] = chunks[ci];
+
+      // ── Fetch log chunk (skipped when resuming mid-timestamp for this chunk) ─
+      if (pendingBlocks === null) {
+        bar.value = 0;
+        barText.textContent = 'Log chunk ' + (ci + 1) + ' / ' + chunks.length
+          + '  (blocks ' + chunkFrom.toLocaleString() + '–' + chunkTo.toLocaleString() + ')'
+          + '  —  ' + logs.length + ' events so far';
+
+        let chunkLogs;
+        while (true) {
+          try {
+            chunkLogs = await window.ethereum.request({
+              method: 'eth_getLogs',
+              params: [{ address: channelsAddr, topics: [TICKET_TOPIC],
+                         fromBlock: '0x' + chunkFrom.toString(16),
+                         toBlock:   '0x' + chunkTo.toString(16) }],
+            });
+            break;
+          } catch (e) {
+            const msg = (e?.message ?? '').toLowerCase();
+            const isRateLimit = msg.includes('429') || msg.includes('rate') ||
+                                msg.includes('too many') || e?.code === -32005;
+            if (!isRateLimit) {
+              const lines = ['Error on log chunk ' + (ci + 1) + ' / ' + chunks.length
+                           + ' (blocks ' + chunkFrom + '–' + chunkTo + '):'];
+              if (e.code    !== undefined) lines.push('  code:    ' + e.code);
+              if (e.message !== undefined) lines.push('  message: ' + e.message);
+              if (e.data    !== undefined) lines.push('  data:    ' + JSON.stringify(e.data));
+              lines.push('  raw: ' + JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
+              out.innerHTML = '<pre>' + lines.join('\n') + '</pre>';
+              hmRunning = false;
+              prog.style.display = 'none';
+              updateHmButtons();
+              return;
+            }
+            for (let s = 10; s > 0; s--) {
+              barText.textContent = 'Rate limited on log fetch — retrying in ' + s + 's…';
+              await new Promise(r => setTimeout(r, 1000));
+              if (hmAborted || hmPaused) break;
+            }
+            if (hmAborted) { done(); return; }
+            if (hmPaused)  { pause(); return; }
+          }
+        }
+        if (hmAborted) { done(); return; }
+        if (hmPaused)  { pause(); return; }
+
+        logs.push(...chunkLogs);
+        if (chunkLogs.length === 0) continue;
+
+        pendingBlocks = [...new Set(chunkLogs.map(l => l.blockNumber))]
+          .filter(b => blockTimes[b] === undefined)
+          .sort((a, b) => parseInt(b, 16) - parseInt(a, 16));
+        pendingBatchI = 0;
+
+        if (pendingBlocks.length === 0) { pendingBlocks = null; continue; }
+      }
+
+      // ── Fetch timestamps for pendingBlocks ────────────────────────────────
+      for (let i = pendingBatchI; i < pendingBlocks.length; i += batchSize) {
+        if (hmAborted) { done(); return; }
+        if (hmPaused)  { pendingBatchI = i; pause(); return; }
+
+        const slice   = pendingBlocks.slice(i, i + batchSize);
+        const idToHex = {};
+        const payload = slice.map((hexNum, j) => {
+          const id = i + j;
+          idToHex[id] = hexNum;
+          return { jsonrpc: '2.0', id, method: 'eth_getBlockByNumber', params: [hexNum, false] };
+        });
+
+        bar.value = Math.round(i / pendingBlocks.length * 100);
+        barText.textContent = 'Log chunk ' + (ci + 1) + ' / ' + chunks.length
+          + '  — timestamps ' + i + ' / ' + pendingBlocks.length
+          + '  (' + logs.length + ' events total)';
+
+        let results;
+        while (true) {
+          try {
+            results = await rpcBatch(payload);
+            const rl = results.find(r => {
+              if (!r.error) return false;
+              const m = (r.error.message ?? '').toLowerCase();
+              return m.includes('429') || m.includes('rate') ||
+                     m.includes('too many') || r.error.code === -32005;
+            });
+            if (rl) throw Object.assign(new Error(rl.error.message ?? 'rate limit'), { code: -32005 });
+            break;
+          } catch (e) {
+            const msg = (e?.message ?? e?.toString() ?? '').toLowerCase();
+            const isRateLimit = msg.includes('429') || msg.includes('rate') ||
+                                msg.includes('too many') || e?.code === -32005;
+            if (!isRateLimit) throw e;
+            for (let s = 10; s > 0; s--) {
+              barText.textContent = 'Rate limited on timestamps — retrying in ' + s + 's…';
+              await new Promise(r => setTimeout(r, 1000));
+              if (hmAborted || hmPaused) break;
+            }
+            if (hmAborted) { done(); return; }
+            if (hmPaused)  { pendingBatchI = i; pause(); return; }
+          }
+        }
+
+        for (const r of results)
+          if (r.result) blockTimes[idToHex[r.id]] = parseInt(r.result.timestamp, 16);
+
+        bar.value = Math.round((i + slice.length) / pendingBlocks.length * 100);
+        barText.textContent = 'Log chunk ' + (ci + 1) + ' / ' + chunks.length
+          + '  — timestamps ' + (i + slice.length) + ' / ' + pendingBlocks.length
+          + '  (' + logs.length + ' events total)';
+
+        renderHeatmap(logs, blockTimes);
+      }
+
+      pendingBlocks = null;
+      pendingBatchI = 0;
+
+      // Fresh Load: pause after the first chunk that produced events so the
+      // user sees an immediate preview and can Resume to load the rest.
+      if (autoStopAfterFirst) { autoStopAfterFirst = false; hmPaused = true; }
+    }
+
+    done();
+  }
+
+  function renderHeatmap(logs, blockTimes) {
+    // Bucket events into UTC date+hour slots
+    const counts = {};   // key: 'YYYY-MM-DDTHH'  →  count
+    for (const log of logs) {
+      const ts = blockTimes[log.blockNumber];
+      if (ts === undefined) continue;
+      const d   = new Date(ts * 1000);
+      const key = d.toISOString().slice(0, 13); // 'YYYY-MM-DDTHH'
+      counts[key] = (counts[key] || 0) + 1;
+    }
+
+    // Most recent date first so incremental renders lead with the latest data.
+    const dates = [...new Set(Object.keys(counts).map(k => k.slice(0, 10)))].sort().reverse();
+    if (dates.length === 0) {
+      document.getElementById('hmOutput').innerHTML = 'No events with resolved timestamps.';
+      return;
+    }
+
+    const maxCount = Math.max(...Object.values(counts));
+
+    // Map count → shade character using log scale so a single large outlier
+    // doesn't compress everything else to the lowest shade.
+    // 0 → space, 1..max → ░ ▒ ▓ █  (log-interpolated).
+    function shadeChar(count) {
+      if (count === 0) return ' ';
+      if (maxCount <= 1) return '░';
+      const idx = Math.min(Math.round((Math.log(count) / Math.log(maxCount)) * 3), 3);
+      return '░▒▓█'[idx];
+    }
+
+    function esc(s) {
+      return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    }
+
+    // Each cell is 2 chars wide (shade + space) to match the "HH " header width.
+    let html = '<pre style="font-size:1.4em">';
+
+    // Header: date label + hour columns
+    html += '            '; // 12 spaces to align with 'YYYY-MM-DD  '
+    for (let h = 0; h < 24; h++) html += String(h).padStart(2, '0') + ' '; // 3 chars: HH + space
+    html += '\n';
+
+    for (const date of dates) {
+      html += date + '  '; // 10 + 2 = 12 chars
+      for (let h = 0; h < 24; h++) {
+        const key   = date + 'T' + String(h).padStart(2, '0');
+        const count = counts[key] || 0;
+        const ch    = shadeChar(count);
+        const tip   = esc(date + ' ' + String(h).padStart(2, '0') + ':00 UTC — ' + count + ' event' + (count !== 1 ? 's' : ''));
+        // Three chars per column: 2 shade chars + space, matching header "HH " width
+        html += '<span data-tip="' + tip + '">' + ch + ch + '\u00a0</span>';
+      }
+      html += '\n';
+    }
+    // Detailed legend inside the same <pre> so font size and family are identical.
+    const SHADE_CHARS = ['░', '▒', '▓', '█'];
+    const shadeRanges = [null, null, null, null];
+    for (let c = 1; c <= maxCount; c++) {
+      const level = maxCount <= 1 ? 0
+        : Math.min(Math.round((Math.log(c) / Math.log(maxCount)) * 3), 3);
+      if (!shadeRanges[level]) shadeRanges[level] = [c, c];
+      else shadeRanges[level][1] = c;
+    }
+    const legendParts = ['[  ]: 0 events'];
+    for (let level = 0; level < 4; level++) {
+      if (!shadeRanges[level]) continue;
+      const [min, max] = shadeRanges[level];
+      const ch    = SHADE_CHARS[level];
+      const range = min === max ? min + ' event' + (min !== 1 ? 's' : '')
+                                : min + '\u2013' + max + ' events';
+      legendParts.push(ch + ch + ': ' + range);
+    }
+    html += '\n' + legendParts.join(', ');
+    html += '</pre>';
+
+    document.getElementById('hmOutput').innerHTML = html;
+  }
+
+  // Tooltip — shared across the whole page
+  const _tip = document.getElementById('hm-tooltip');
+  document.addEventListener('mouseover',  e => { if (e.target.dataset.tip) { _tip.textContent = e.target.dataset.tip; _tip.style.display = 'block'; } });
+  document.addEventListener('mouseout',   e => { if (e.target.dataset.tip) { _tip.style.display = 'none'; } });
+  document.addEventListener('mousemove',  e => { if (_tip.style.display !== 'none') { _tip.style.left = (e.clientX + 14) + 'px'; _tip.style.top = (e.clientY + 14) + 'px'; } });
+
 </script>
+
+<!-- Tooltip element (no styling page-wide, but needs position:fixed to work) -->
 
 </body>
 </html>
