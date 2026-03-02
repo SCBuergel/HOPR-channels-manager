@@ -1,3 +1,4 @@
+require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
@@ -10,6 +11,10 @@ const RPC_URL = process.env.RPC_URL;
 // ── 1. Upload to Pinata ──────────────────────────────────────────────────────
 
 async function uploadToPinata() {
+  if (!PINATA_JWT) {
+    throw new Error("PINATA_JWT environment variable is not set. Please configure it in your .env file.");
+  }
+
   const fileBuffer = fs.readFileSync(path.resolve("index.html"));
   const formData = new FormData();
   formData.append("file", new File([fileBuffer], "index.html", { type: "text/html" }));
@@ -21,7 +26,19 @@ async function uploadToPinata() {
     headers: { Authorization: `Bearer ${PINATA_JWT}` },
     body: formData,
   });
+
+  if (!res.ok) {
+    const errorBody = await res.text();
+    throw new Error(`Pinata API error: ${res.status} ${res.statusText}\nResponse: ${errorBody}\n\nMake sure your PINATA_JWT is valid and has not expired.`);
+  }
+
   const data = await res.json();
+
+  if (!data.data || !data.data.cid) {
+    console.error("Unexpected Pinata response:", data);
+    throw new Error("Pinata response missing 'data.data.cid'. Check PINATA_JWT validity and response structure.");
+  }
+
   const cid = data.data.cid;
   console.log("Pinned CID:", cid);
   return cid;
@@ -86,6 +103,11 @@ const RESOLVER_ABI = [
 ];
 
 async function updateENS(cid) {
+  if (!ENS_PRIVATE_KEY || !RPC_URL) {
+    console.error("ENS_PRIVATE_KEY and RPC_URL environment variables are required to update ENS records.");
+    return;
+  }
+
   const provider = new ethers.JsonRpcProvider(RPC_URL);
   const wallet = new ethers.Wallet(ENS_PRIVATE_KEY, provider);
 
