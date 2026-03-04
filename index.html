@@ -763,6 +763,210 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
     done();
   }
 
+  // ── ASCII line / scatter chart ────────────────────────────────────────────
+
+  // Linear interpolation helper used by asciiLineChart.
+  function _interpolateY(pts, x) {
+    if (x <= pts[0].x)            return pts[0].y;
+    if (x >= pts[pts.length-1].x) return pts[pts.length-1].y;
+    let lo = 0, hi = pts.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (pts[mid].x <= x) lo = mid; else hi = mid;
+    }
+    const dx = pts[hi].x - pts[lo].x;
+    if (dx === 0) return pts[hi].y;
+    const t = (x - pts[lo].x) / dx;
+    return pts[lo].y + t * (pts[hi].y - pts[lo].y);
+  }
+
+  /**
+   * asciiLineChart(opts) → string
+   *
+   * Renders a simple ASCII line chart (or scatter plot for dense data).
+   *
+   * opts:
+   *   title   – chart title (centred above the plot)
+   *   xTitle  – x-axis label (centred below the plot)
+   *   yTitle  – y-axis label (drawn vertically on the left)
+   *   data    – array of [x, y] or {x, y} pairs, any order
+   *   width   – plot-area width  in characters (default 60)
+   *   height  – plot-area height in characters (default 20)
+   *   xTicks  – approx number of x-axis ticks (default 5)
+   *   yTicks  – approx number of y-axis ticks (default 5)
+   *
+   * Line characters used:
+   *   '-'  horizontal segment       (slope ≈ 0)
+   *   '/'  45° upward diagonal      (slope ≈ +1, going up-right)
+   *   '\'  45° downward diagonal    (slope ≈ -1, going down-right)
+   *   '|'  vertical segment         (|slope| >> 1)
+   *   '*'  endpoint of the line
+   *   '#'  scatter block (dense mode: more data pts than plot columns)
+   */
+  function asciiLineChart(opts) {
+    const {
+      title  = '',
+      xTitle = '',
+      yTitle = '',
+      data   = [],
+      width  = 60,
+      height = 20,
+      xTicks = 5,
+      yTicks = 5,
+    } = opts;
+
+    if (!data || data.length === 0) return '(no data)';
+
+    // Normalise to {x, y} and sort by x
+    const pts = data.map(d => Array.isArray(d) ? { x: d[0], y: d[1] } : { x: d.x, y: d.y });
+    pts.sort((a, b) => a.x - b.x);
+
+    const xMin = pts[0].x;
+    const xMax = pts[pts.length - 1].x;
+    const yMin = Math.min(...pts.map(p => p.y));
+    const yMax = Math.max(...pts.map(p => p.y));
+    const xRange = xMax - xMin || 1;
+    const yRange = yMax - yMin || 1;
+
+    // Dense mode: more data points than plot columns → scatter
+    const dense = pts.length > width;
+
+    // Map value → grid index
+    function toCol(x) {
+      return Math.min(width  - 1, Math.max(0, Math.round((x - xMin) / xRange * (width  - 1))));
+    }
+    function toRow(y) {
+      // row 0 = top (yMax), row height-1 = bottom (yMin)
+      return Math.min(height - 1, Math.max(0, Math.round((yMax - y) / yRange * (height - 1))));
+    }
+
+    // Blank character grid
+    const grid = Array.from({ length: height }, () => new Array(width).fill(' '));
+
+    if (dense) {
+      // Scatter: one '#' per column at the mean y of all points in that column
+      const bkts = Array.from({ length: width }, () => ({ sum: 0, n: 0 }));
+      for (const p of pts) {
+        const c = toCol(p.x);
+        bkts[c].sum += p.y;
+        bkts[c].n++;
+      }
+      for (let c = 0; c < width; c++) {
+        if (bkts[c].n === 0) continue;
+        grid[toRow(bkts[c].sum / bkts[c].n)][c] = '#';
+      }
+    } else {
+      // Line chart: sample one y per column via linear interpolation,
+      // then connect adjacent samples with the closest-matching ASCII char.
+      const colRows = new Array(width);
+      for (let c = 0; c < width; c++) {
+        const x = width === 1 ? xMin : xMin + (c / (width - 1)) * xRange;
+        colRows[c] = toRow(_interpolateY(pts, x));
+      }
+
+      for (let c = 0; c < width - 1; c++) {
+        const r1 = colRows[c];
+        const r2 = colRows[c + 1];
+        const dr = r2 - r1;   // positive = downward in display
+
+        if      (dr === 0)  { grid[r1][c] = '-'; }
+        else if (dr === 1)  { grid[r1][c] = '\\'; }
+        else if (dr === -1) { grid[r1][c] = '/'; }
+        else if (dr > 1) {
+          // Steep descent: leading '\' then '|' fill toward r2
+          grid[r1][c] = '\\';
+          for (let r = r1 + 1; r < r2; r++) grid[r][c] = '|';
+        } else {
+          // Steep ascent: leading '/' then '|' fill toward r2
+          grid[r1][c] = '/';
+          for (let r = r2 + 1; r < r1; r++) grid[r][c] = '|';
+        }
+      }
+      // Mark the rightmost data point
+      if (grid[colRows[width - 1]][width - 1] === ' ')
+        grid[colRows[width - 1]][width - 1] = '*';
+    }
+
+    // ── Axis label helpers ────────────────────────────────────────────────
+    function fmtN(n) {
+      const abs = Math.abs(n);
+      let v, s;
+      if      (abs >= 1e9) { v = n / 1e9; s = 'G'; }
+      else if (abs >= 1e6) { v = n / 1e6; s = 'M'; }
+      else if (abs >= 1e3) { v = n / 1e3; s = 'k'; }
+      else { return Number.isInteger(n) ? String(n) : n.toFixed(1); }
+      return (Number.isInteger(v) ? String(v) : v.toFixed(1)) + s;
+    }
+
+    // Y ticks (deduplicated by row index)
+    const usedYR = new Set();
+    const yTL = [];
+    for (let i = 0; i < yTicks; i++) {
+      const v = yMin + (i / (yTicks - 1)) * yRange;
+      const r = toRow(v);
+      if (!usedYR.has(r)) { usedYR.add(r); yTL.push({ row: r, label: fmtN(v) }); }
+    }
+
+    // X ticks (deduplicated by column index)
+    const usedXC = new Set();
+    const xTL = [];
+    for (let i = 0; i < xTicks; i++) {
+      const v = xMin + (i / (xTicks - 1)) * xRange;
+      const c = toCol(v);
+      if (!usedXC.has(c)) { usedXC.add(c); xTL.push({ col: c, label: fmtN(v) }); }
+    }
+
+    const yLW   = Math.max(4, ...yTL.map(t => t.label.length)); // y-label column width
+    const yTW   = yTitle ? 2 : 0;   // y-title char + 1 space gap
+    const leftW = yTW + yLW + 1;    // +1 for axis char '|'
+    const lines = [];
+
+    // Chart title (centred over the full output width)
+    if (title) {
+      const totalW = leftW + width;
+      const pad    = Math.max(0, Math.floor((totalW - title.length) / 2));
+      lines.push(' '.repeat(pad) + title);
+      lines.push('');
+    }
+
+    // Plot rows, each prefixed by the y-axis
+    const yTC  = yTitle.split('');
+    const yTS  = Math.floor(height / 2) - Math.floor(yTC.length / 2);
+    for (let row = 0; row < height; row++) {
+      const tick  = yTL.find(t => t.row === row);
+      const label = tick ? tick.label.padStart(yLW) : ' '.repeat(yLW);
+      const axis  = tick ? '+' : '|';
+      let tc = ' ';
+      if (yTitle) {
+        const idx = row - yTS;
+        tc = (idx >= 0 && idx < yTC.length) ? yTC[idx] : ' ';
+      }
+      lines.push((yTitle ? tc + ' ' : '') + label + axis + grid[row].join(''));
+    }
+
+    // X-axis line
+    lines.push(' '.repeat(yTW + yLW) + '+' + '-'.repeat(width));
+
+    // X tick labels
+    const xArr = new Array(width).fill(' ');
+    for (const { col, label } of xTL) {
+      const start = col - Math.floor(label.length / 2);
+      for (let i = 0; i < label.length; i++) {
+        const idx = start + i;
+        if (idx >= 0 && idx < width) xArr[idx] = label[i];
+      }
+    }
+    lines.push(' '.repeat(leftW) + xArr.join(''));
+
+    // X-axis title (centred under the plot)
+    if (xTitle) {
+      const pad = Math.max(0, Math.floor((leftW + width - xTitle.length) / 2));
+      lines.push(' '.repeat(pad) + xTitle);
+    }
+
+    return lines.join('\n');
+  }
+
   function renderHeatmap(logs, blockTimes) {
     // Bucket events into UTC date+hour slots
     const counts = {};   // key: 'YYYY-MM-DDTHH'  →  count
@@ -839,6 +1043,31 @@ wxHOPR balance: <strong id="tokenBalance">--</strong>
     html += '</pre>';
 
     document.getElementById('hmOutput').innerHTML = html;
+
+    // ── ASCII cumulative events chart ────────────────────────────────────
+    const resolved = logs
+      .map(l => blockTimes[l.blockNumber])
+      .filter(ts => ts !== undefined)
+      .sort((a, b) => a - b);
+
+    if (resolved.length >= 2) {
+      const t0        = resolved[0];
+      const chartData = resolved.map((ts, i) => [ts - t0, i + 1]);
+      const chartStr  = asciiLineChart({
+        title:  'Accumulated TicketRedeemed Events',
+        xTitle: 'time (seconds from first event)',
+        yTitle: 'count',
+        data:   chartData,
+        width:  70,
+        height: 20,
+        xTicks: 5,
+        yTicks: 5,
+      });
+      const pre = document.createElement('pre');
+      pre.style.cssText = 'font-size:1.1em;margin-top:1.5em;line-height:1.3';
+      pre.textContent   = chartStr;
+      document.getElementById('hmOutput').appendChild(pre);
+    }
   }
 
   // Tooltip — shared across the whole page
